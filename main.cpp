@@ -8,9 +8,6 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 
-#include <vector>
-#include <iostream>
-
 //==============================================================================
 //==============================================================================
 #define __FILENAME__ (strrchr(__FILE__, '/') ? strrchr(__FILE__, '/') + 1 : __FILE__)
@@ -30,9 +27,10 @@
 
 //==============================================================================
 
-#define READ_END 0
-#define WRITE_END 1
+#define READ_END    0
+#define WRITE_END   1
 
+//==============================================================================
 
 /*
 Пусть у нас есть длинная команда вида:
@@ -51,23 +49,19 @@ who | sort | uniq -c | sort -nk1
 После чего она исполнит его несколько раз, подавая на STDIN разные строчки и проверяя result.out.
 */
 
-struct shcmd_t {
-    std::string cmd;
-    const char* args[];
-};
+#define MAX_ARGS_COUNT      (8)
+#define MAX_CMDS_COUNT      (16)
+#define MAX_CMD_LENGTH      (64)
+
+#define MAX_INPUT_LENGTH    (MAX_CMD_LENGTH * MAX_CMDS_COUNT)
+
 
 struct shellcmd_t {
-    const char *cmd;
-    const char *args;
+    char *args[MAX_ARGS_COUNT];
     int pfds[2];
 };
 
-static shellcmd_t TestCommands[] = {
-    {"/usr/bin/who", NULL},
-    {"/usr/bin/sort", NULL},
-    {"/usr/bin/uniq" , "-c"},
-    {"/usr/bin/sort",  "-nk1"}
-};
+static shellcmd_t test_commands[MAX_CMDS_COUNT] = {0};
 
 /*
 Cоздать неименованный канал.
@@ -89,89 +83,74 @@ int pipe(int fd[2]); // В fd[1] можно писать, из fd[0] читат�
 //==============================================================================
 int main(int argc, char *argv[])
 {
-    std::string filepath(getenv("HOME"));
-    filepath += "/result.out";
 
-    const char *result_file = filepath.c_str();
+#if 1
+    char raw_input[MAX_INPUT_LENGTH] = "who | sort | uniq -c | sort -nk1";
+#else
+    char raw_input[MAX_INPUT_LENGTH] = {0};
+    gets(raw_input);
+#endif
 
-    FILE *result = fopen(result_file, "w+");
 
-    int res_fd = fileno(result);
+    shellcmd_t *command = NULL;
 
+    int cmdcnt = 0;
+    int argcnt = 0;
+    char *pch = strtok(raw_input, "| ");
+    while (pch) {
+        if ((pch[0] == '-') && command) {
+            command->args[argcnt++] = pch;
+        } else {
+            command = &test_commands[cmdcnt++];
+            argcnt = 1;
+            command->args[0] = pch;
+        }
 
-//    char buf[1024];
-//    ssize_t sz = readlink("/proc/self/exe", buf, sizeof(buf));
-//    if (sz < 0) exitError();
-//    buf[sz] = 0;
-//    printf("%s\n", buf);
-
-//    return 0;
-    std::string rawcmds("who | sort | uniq -c | sort -nk1");
-//    std::string rawcmds;
-//    std::getline (std::cin, rawcmds);
-
-    std::vector<std::string> commands;
-
-    char *pch = strtok((char*)rawcmds.c_str(), "|");
-
-    while (pch != NULL) {
-	commands.push_back(std::string(pch));
-	pch = strtok(NULL, "| ");
+        pch = strtok(NULL, "| ");
     }
 
-    for (auto s : commands) {
-	printf("%s\n", s.c_str());
+    const char *homedir = getenv("HOME");
+    if (!homedir) {
+        fprintf(stderr, "Can\'t find HOME directory!\n");
+        return (EXIT_FAILURE);
     }
-    return 0;
 
-   /* char str[] ="- This, a sample string.";
-  char * pch;
-  printf ("Splitting string \"%s\" into tokens:\n",str);
-  pch = strtok (str," ,.-");
-  while (pch != NULL)
-  {
-    printf ("%s\n",pch);
-    pch = strtok (NULL, " ,.-");
-  }
-  return 0;
-    */
+    char filepath[128];
+    sprintf(filepath, "%s/result.out", homedir);
 
-    int ffd = open("test.txt", O_WRONLY | O_CREAT | O_TRUNC, S_IRWXU);
-
-    for (int i = 0; i < countof(TestCommands); i++) {
-	shellcmd_t shellcmd = TestCommands[i];
-
-	close(STDOUT_FILENO);
-	dup2(ffd, STDOUT_FILENO);
+    int res_fd = open(filepath, O_WRONLY | O_CREAT | O_TRUNC, S_IRWXU);
 
 
-	pipe(shellcmd.pfds);
+    for (int i = 0; i < countof(test_commands); i++) {
+        shellcmd_t *command = &test_commands[i];
 
-	const int &read_fd = shellcmd.pfds[0];  // read FROM pipe
-	const int &write_fd = shellcmd.pfds[1]; // write TO pipe
+        close(STDOUT_FILENO);
+        dup2(res_fd, STDOUT_FILENO);
 
-	pid_t child = fork();
-	if (child == 0) {
-	    /* child */
-	    close(STDIN_FILENO);
-	    dup2(read_fd, STDIN_FILENO);
-	    close(write_fd);
-	    close(read_fd);
-	    execlp(shellcmd.cmd, shellcmd.cmd, shellcmd.args, NULL);
-	} else if (child > 0) {
-	    /* parent */
-	    close(STDOUT_FILENO);
-	    dup2(write_fd, STDOUT_FILENO);
-	    close(write_fd);
-	    close(read_fd);
-	    int status = 0;
-	    waitpid(child, &status, WNOHANG);
-	}
+
+        pipe(command->pfds);
+
+        pid_t child = fork();
+        if (child == 0) {
+            /* child */
+            close(STDIN_FILENO);
+            dup2(command->pfds[READ_END], STDIN_FILENO);
+            close(command->pfds[WRITE_END]);
+            close(command->pfds[READ_END]);
+            execvp(command->args[0], command->args);
+        } else if (child > 0) {
+            /* parent */
+            close(STDOUT_FILENO);
+            dup2(command->pfds[WRITE_END], STDOUT_FILENO);
+            close(command->pfds[WRITE_END]);
+            close(command->pfds[READ_END]);
+            int status = 0;
+            waitpid(child, &status, WNOHANG);
+        }
     }
 
 
-    close(ffd);
-    fclose(result);
+    close(res_fd);
 
     return 0;
 }
